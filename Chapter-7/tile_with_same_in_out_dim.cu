@@ -15,6 +15,10 @@
 
 #define FILTER_RADIUS 2
 
+#define TILE_DIM 16
+
+__constant__ float F[2 * FILTER_RADIUS + 1][2 * FILTER_RADIUS + 1];
+
 // Initializes array with simple test values
 __global__ void initData(float *data, int size, float value = 1.0f)
 {
@@ -29,6 +33,18 @@ __global__ void initData(float *data, int size, float value = 1.0f)
         col += stride_y;
     }
 }
+
+void initFilterHost(float *data, int size, float value = 1.0f)
+{
+    for (int i = 0; i < size; i++)
+    {
+        for (int j = 0; j < size; j++)
+        {
+            data[i * size + j] = value;
+        }
+    }
+}
+
 void print(float *data, int size)
 {
     for (int i = 0; i < size; i++)
@@ -40,24 +56,49 @@ void print(float *data, int size)
     }
 }
 
-__global__ void convolution_2D_basic_kernel(float *N, float *F, float *P, int r, int width, int height)
+__global__ void convolution_2D_basic_kernel(float *N, float *P, int r, int width, int height)
 {
-    int outCol = threadIdx.x + blockIdx.x * blockDim.x;
-    int outRow = threadIdx.y + blockIdx.y * blockDim.y;
-    float Pvalue = 0.0f;
-    for (int fRow = 0; fRow < 2 * r + 1; fRow++)
+
+    int col = blockIdx.x * TILE_DIM + threadIdx.x;
+    int row = blockIdx.y * TILE_DIM + threadIdx.y;
+
+    __shared__ float N_s[TILE_DIM][TILE_DIM];
+
+    if (row >= 0 && row < height && col >= 0 && col < width)
     {
-        for (int fCol = 0; fCol < 2 * r + 1; fCol++)
+        N_s[threadIdx.y][threadIdx.x] = N[row * width + col];
+    }
+    else
+    {
+        N_s[threadIdx.y][threadIdx.x] = 0.0;
+    }
+    __syncthreads();
+
+    if(col< width && row < height)
+    {
+        float Pvalue = 0.0f;
+        for (int fRow = 0; fRow < 2*FILTER_RADIUS + 1; fRow ++)
         {
-            int inRow = outRow - r + fRow;
-            int inCol = outCol - r + fCol;
-            if (inRow >= 0 && inRow < height && inCol >= 0 && inCol < width)
+            for(int fCol = 0; fCol < 2*FILTER_RADIUS + 1; fCol++)
             {
-                Pvalue += F[fRow * (2 * r + 1) + fCol] * N[inRow * width + inCol];
+                if((int)threadIdx.x - FILTER_RADIUS + fCol >= 0 &&
+                    (int)threadIdx.x - FILTER_RADIUS + fCol < TILE_DIM &&
+                    (int)threadIdx.y - FILTER_RADIUS + fRow >= 0 &&
+                    (int)threadIdx.y - FILTER_RADIUS + fRow <TILE_DIM)
+                {
+                    Pvalue += F[fRow][fCol] * N_s[threadIdx.y - FILTER_RADIUS + fRow][threadIdx.x - FILTER_RADIUS + fCol];
+                }
+                else if (row - FILTER_RADIUS + fRow >= 0 &&
+                    row - FILTER_RADIUS + fRow < height &&
+                    col - FILTER_RADIUS + fCol >=0 &&
+                    col - FILTER_RADIUS + fCol < width)
+                {
+                    Pvalue += F[fRow][fCol] * N[(row - FILTER_RADIUS + fRow) * width + (col - FILTER_RADIUS + fCol)];
+                }
             }
         }
+        P[row * width + col] = Pvalue;
     }
-    P[outRow * width + outCol] = Pvalue;
 }
 
 void verify_convolution(float *input, float *filter, float *gpu_output, int radius, int width, int height)
@@ -108,12 +149,11 @@ int main(int argc, char *argv[])
     int filterSize = (2 * FILTER_RADIUS + 1) * (2 * FILTER_RADIUS + 1) * sizeof(float);
 
     float *matrix_h, *filter_h, *output_h;
-    float *matrix_d, *filter_d, *output_d;
+    float *matrix_d, *output_d;
 
     cudaCheck(cudaMallocHost(&matrix_h, matrixSize));
     cudaCheck(cudaMalloc(&matrix_d, matrixSize));
     cudaCheck(cudaMallocHost(&filter_h, filterSize));
-    cudaCheck(cudaMalloc(&filter_d, filterSize));
     cudaCheck(cudaMallocHost(&output_h, matrixSize));
     cudaCheck(cudaMalloc(&output_d, matrixSize));
 
@@ -122,24 +162,20 @@ int main(int argc, char *argv[])
     initData<<<grid, block>>>(matrix_d, MATRIX_HEIGHT, 2.0);
     cudaCheck(cudaDeviceSynchronize());
 
-    block = dim3(5, 5);
-    grid = dim3(ceil((float)(2 * FILTER_RADIUS + 1) / block.x), ceil((float)(2 * FILTER_RADIUS + 1) / block.y));
-    initData<<<grid, block>>>(filter_d, (2 * FILTER_RADIUS + 1), 3.0);
-    cudaCheck(cudaDeviceSynchronize());
+    initFilterHost(filter_h, 2 * FILTER_RADIUS + 1, 3.0f);
+    cudaCheck(cudaMemcpyToSymbol(F, filter_h, filterSize));
 
-    block = dim3(16, 16);
-    grid = dim3(ceil((float)MATRIX_HEIGHT / block.x), ceil((float)MATRIX_WIDTH / block.y));
-    convolution_2D_basic_kernel<<<grid, block>>>(matrix_d, filter_d, output_d, FILTER_RADIUS, MATRIX_HEIGHT, MATRIX_WIDTH);
+    block = dim3(TILE_DIM, TILE_DIM);
+    grid = dim3((MATRIX_WIDTH + TILE_DIM - 1) / TILE_DIM, (MATRIX_HEIGHT + TILE_DIM - 1) / TILE_DIM);
+    convolution_2D_basic_kernel<<<grid, block>>>(matrix_d, output_d, FILTER_RADIUS, MATRIX_HEIGHT, MATRIX_WIDTH);
     cudaCheck(cudaDeviceSynchronize());
     cudaCheck(cudaMemcpy(output_h, output_d, matrixSize, cudaMemcpyDeviceToHost));
     cudaCheck(cudaMemcpy(matrix_h, matrix_d, matrixSize, cudaMemcpyDeviceToHost));
-    cudaCheck(cudaMemcpy(filter_h, filter_d, filterSize, cudaMemcpyDeviceToHost));
     cudaCheck(cudaDeviceSynchronize());
     verify_convolution(matrix_h, filter_h, output_h, FILTER_RADIUS, MATRIX_WIDTH, MATRIX_HEIGHT);
 
     cudaFree(matrix_d);
     cudaFree(matrix_h);
-    cudaFree(filter_d);
     cudaFree(filter_h);
     cudaFree(output_d);
     cudaFree(output_h);

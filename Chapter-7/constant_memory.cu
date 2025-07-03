@@ -10,8 +10,8 @@
         }                                                                          \
     }
 
-#define MATRIX_HEIGHT 2048
-#define MATRIX_WIDTH 2048
+#define MATRIX_HEIGHT (1<<14)
+#define MATRIX_WIDTH (1<<14)
 
 #define FILTER_RADIUS 2
 

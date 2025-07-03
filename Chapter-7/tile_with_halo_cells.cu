@@ -10,12 +10,12 @@
         }                                                                          \
     }
 
-#define MATRIX_HEIGHT 2048
-#define MATRIX_WIDTH 2048
+#define MATRIX_HEIGHT (1<<14)
+#define MATRIX_WIDTH (1<<14)
 
 #define FILTER_RADIUS 2
 
-#define IN_TILE_DIM 32
+#define IN_TILE_DIM 16
 #define OUT_TILE_DIM ((IN_TILE_DIM) - 2 * (FILTER_RADIUS))
 
 __constant__ float F[2 * FILTER_RADIUS + 1][2 * FILTER_RADIUS + 1];
